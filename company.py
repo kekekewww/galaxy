@@ -138,40 +138,42 @@ class Company:
 class TitanCompany(Company):
     """
     Titan (泰坦) — Base 3, Talent +2 → starts at (tech=3, talent=5, support=3, funds=3).
-    Passive: [TBD — expected combat / seize advantage].
+    Passive: 搶佔不消耗額外資源 — seize uses occupy_req instead of seize_req.
+    Applied to Titan and its alliance partner.
+    Implementation: handled by GameEngine._seize_requirements().
     """
 
     def passive_ability(self) -> None:
-        """Placeholder for Titan's unique passive ability."""
+        """Titan's seize cost reduction is applied by the engine."""
         pass
 
 
 class CelestialCompany(Company):
     """
     Celestial (天穹) — Base 1, Tech +3 → starts at (tech=4, talent=1, support=1, funds=1).
-    Passive: Resource conversion (Tech → other resource types).
+    Passive: 每次獲得技術點時，可消耗 1 人才轉換為 2 額外技術（每回合一次）。
+    Talent cost uses the alliance shared ledger; extra Tech goes to the triggering company.
+    Implementation: triggered by GameEngine._check_celestial_conversion().
     """
 
-    def passive_ability(self) -> None:
-        """Placeholder for Celestial's passive ability."""
-        pass
-
-    def convert_resource(
+    def __init__(
         self,
-        from_resource: str,
-        to_resource: str,
-        amount: int,
-        rate: int = 1,
-    ) -> bool:
-        """
-        Placeholder: convert `amount` of `from_resource` into `amount * rate`
-        of `to_resource`. Exact conversion ratio TBD in full ruleset.
-        Returns True on success, False if balance insufficient.
-        """
-        if not self.consume_resource(from_resource, amount):
-            return False
-        self.add_resource(to_resource, amount * rate)
-        return True
+        name: str,
+        tech: int,
+        talent: int,
+        support: int,
+        funds: int,
+    ) -> None:
+        super().__init__(name, tech, talent, support, funds)
+        self.used_conversion_this_turn: bool = False
+
+    def reset_conversion_flag(self) -> None:
+        """Called by GameEngine at the start of each company's turn."""
+        self.used_conversion_this_turn = False
+
+    def passive_ability(self) -> None:
+        """Celestial's conversion is triggered by the engine."""
+        pass
 
 
 class GalaxyCompany(Company):
@@ -195,28 +197,12 @@ class GalaxyCompany(Company):
 class StellarCompany(Company):
     """
     Stellar (恆星) — Base 1, Funds +4 → starts at (tech=1, talent=1, support=1, funds=5).
-    Passive: When in an alliance, the single resource requirement with the lowest
-             cost value is exempt from consumption.
+    Passive: 聯盟中，最低費用資源需求免除。
+    Applied to Stellar and its alliance partner.
+    Implementation: handled by GameEngine._effective_requirements() before
+    consumption, preventing double-application with the shared ledger.
     """
 
-    def consume_resources(self, requirements: ResourceDict) -> bool:
-        """
-        Stellar override: if in_alliance and requirements has ≥1 entry,
-        drop the key with the smallest required amount before consuming.
-        Tie-breaking follows dict iteration order (first minimum wins).
-        """
-        effective = requirements
-        if self.in_alliance and requirements:
-            exempt_key = min(requirements, key=lambda r: requirements[r])
-            effective = {k: v for k, v in requirements.items() if k != exempt_key}
-
-        for resource, amount in effective.items():
-            if getattr(self, resource, 0) < amount:
-                return False
-        for resource, amount in effective.items():
-            self.consume_resource(resource, amount)
-        return True
-
     def passive_ability(self) -> None:
-        """Placeholder for any additional Stellar passive logic."""
+        """Stellar's exemption is applied by the engine."""
         pass

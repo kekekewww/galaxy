@@ -6,7 +6,14 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 from typing import Dict, List, Optional, Tuple
 
-from company import Company, StellarCompany, GalaxyCompany, RESOURCE_KEYS
+from company import (
+    Company,
+    TitanCompany,
+    CelestialCompany,
+    GalaxyCompany,
+    StellarCompany,
+    RESOURCE_KEYS,
+)
 from planet import Planet, PlanetStatus
 
 
@@ -122,6 +129,13 @@ class GameEngine:
       3. 聯盟  — 組成或解除雙邊聯盟
       4. 事件  — 事件卡（佔位符）
       5. 結算  — 收取各星球的回合收益
+
+    核心經濟系統：
+      - 聯盟共用帳本：行動費用以雙方合計資源判定可行性，
+        扣除時先從行動方扣除，不足部分由盟友支付。
+      - 泰坦被動：搶佔使用佔領費用。
+      - 天穹被動：獲得技術時可消耗 1 人才 → 2 額外技術（每回合一次）。
+      - 恆星被動：聯盟中，最低費用資源需求免除。
     """
 
     def __init__(
@@ -135,9 +149,169 @@ class GameEngine:
         # 雙邊聯盟表：公司名 → 盟友名
         self._alliances: Dict[str, str] = {}
 
-    # -------------------------------------------------------------------
-    # UI 工具方法
-    # -------------------------------------------------------------------
+    # ===================================================================
+    # Alliance / Shared Ledger core
+    # ===================================================================
+
+    def _get_ally(self, company: Company) -> Optional[Company]:
+        """Return the alliance partner object, or None."""
+        ally_name = self._alliances.get(company.name)
+        if ally_name is None:
+            return None
+        return next((c for c in self.companies if c.name == ally_name), None)
+
+    def _combined_can_afford(
+        self, company: Company, requirements: Dict[str, int]
+    ) -> bool:
+        """Check if the company + ally have enough combined resources."""
+        if not requirements:
+            return True
+        ally = self._get_ally(company)
+        for resource, amount in requirements.items():
+            total = getattr(company, resource)
+            if ally:
+                total += getattr(ally, resource)
+            if total < amount:
+                return False
+        return True
+
+    def _consume_shared(
+        self, company: Company, requirements: Dict[str, int]
+    ) -> bool:
+        """
+        聯盟共用帳本扣除：先從行動方扣除，不足部分由盟友支付。
+        Returns False (without mutating state) if combined total is insufficient.
+        """
+        ally = self._get_ally(company)
+
+        # 1) Pre-check total affordability
+        for resource, amount in requirements.items():
+            total = getattr(company, resource)
+            if ally:
+                total += getattr(ally, resource)
+            if total < amount:
+                return False
+
+        # 2) Deduct: active company first, overflow to ally
+        for resource, amount in requirements.items():
+            active_has = getattr(company, resource)
+            if active_has >= amount:
+                setattr(company, resource, active_has - amount)
+            else:
+                # Exhaust active company's balance, remainder from ally
+                setattr(company, resource, 0)
+                remaining = amount - active_has
+                ally_has = getattr(ally, resource)  # type: ignore[union-attr]
+                setattr(ally, resource, ally_has - remaining)  # type: ignore[union-attr]
+                print(
+                    f"  │    ⤷ 聯盟共用帳本："
+                    f"{_cn(ally.name)} 支付 {remaining} {_rn(resource)}"  # type: ignore[union-attr]
+                )
+        return True
+
+    # ===================================================================
+    # Passive-aware requirement calculation
+    # ===================================================================
+
+    def _effective_requirements(
+        self, company: Company, base_req: Dict[str, int]
+    ) -> Dict[str, int]:
+        """
+        Apply Stellar's exemption to any requirement dict.
+        Drops the lowest-cost key if the company or its ally is Stellar
+        and the company is in an alliance.
+        """
+        if not base_req:
+            return base_req
+        ally = self._get_ally(company)
+        is_stellar = (
+            isinstance(company, StellarCompany)
+            or (ally is not None and isinstance(ally, StellarCompany))
+        )
+        if is_stellar and company.in_alliance:
+            exempt = min(base_req, key=lambda k: base_req[k])
+            return {k: v for k, v in base_req.items() if k != exempt}
+        return base_req
+
+    def _seize_requirements(
+        self, company: Company, planet: Planet
+    ) -> Dict[str, int]:
+        """
+        Determine effective seize cost:
+          1. Titan passive → use occupy_req instead of seize_req
+          2. Stellar passive → drop lowest-cost key
+        """
+        ally = self._get_ally(company)
+        is_titan = (
+            isinstance(company, TitanCompany)
+            or (ally is not None and isinstance(ally, TitanCompany))
+        )
+        base = planet.occupy_req if is_titan else planet.seize_req
+        return self._effective_requirements(company, base)
+
+    # ===================================================================
+    # Celestial conversion trigger
+    # ===================================================================
+
+    def _check_celestial_conversion(
+        self, company: Company, resource: str, amount: int
+    ) -> None:
+        """
+        天穹被動：獲得技術時，可消耗 1 人才 → 2 額外技術（每回合一次）。
+        人才消耗遵循聯盟共用帳本規則。額外技術歸觸發方。
+        """
+        if resource != "tech" or amount <= 0:
+            return
+
+        ally = self._get_ally(company)
+
+        # Identify the Celestial company in this alliance (if any)
+        celestial: Optional[CelestialCompany] = None
+        if isinstance(company, CelestialCompany):
+            celestial = company
+        elif ally is not None and isinstance(ally, CelestialCompany):
+            celestial = ally
+
+        if celestial is None or celestial.used_conversion_this_turn:
+            return
+
+        # Check combined talent ≥ 1
+        talent_total = company.talent
+        if ally:
+            talent_total += ally.talent
+        if talent_total < 1:
+            return
+
+        # Display talent breakdown and prompt
+        talent_detail = f"{_cn(company.name)}={company.talent}"
+        if ally:
+            talent_detail += f"  {_cn(ally.name)}={ally.talent}"
+
+        print(f"  │")
+        print(f"  │  ✦ 天穹被動觸發！可消耗 1 人才 → 獲得 2 額外技術")
+        print(f"  │    目前人才：{talent_detail}")
+
+        if _yes_no("  │    是否轉換？(y/n)："):
+            self._consume_shared(company, {"talent": 1})
+            company.add_resource("tech", 2)  # direct add — no re-trigger
+            celestial.used_conversion_this_turn = True
+            print(f"  │    ✓ 轉換完成！-1 人才，+2 技術。")
+            print(f"  │    目前資源：{self._res_summary(company)}")
+
+    def _grant_resource(
+        self, company: Company, resource: str, amount: int
+    ) -> None:
+        """
+        Add resource then check Celestial conversion trigger.
+        Use this instead of company.add_resource() wherever the engine grants
+        resources (shop gains, settlement rewards, etc.).
+        """
+        company.add_resource(resource, amount)
+        self._check_celestial_conversion(company, resource, amount)
+
+    # ===================================================================
+    # UI helpers
+    # ===================================================================
 
     @staticmethod
     def _line(char: str = "─", width: int = 62) -> str:
@@ -151,14 +325,17 @@ class GameEngine:
         )
 
     def _print_header(self, company: Company) -> None:
-        ally_key = self._alliances.get(company.name)
-        ally_label = _cn(ally_key) if ally_key else "無"
+        ally = self._get_ally(company)
+        ally_label = _cn(ally.name) if ally else "無"
 
         print("\n" + self._line("═"))
         print(f"  第 {self.current_turn} 回合  ——  {_cn(company.name)}")
         print(self._line("═"))
         print(f"  資源：{self._res_summary(company)}")
-        print(f"  聯盟：{ally_label}")
+        if ally:
+            print(f"  聯盟：{ally_label}  （{self._res_summary(ally)}）")
+        else:
+            print(f"  聯盟：{ally_label}")
         print()
         print("  ── 天體狀態 " + "─" * 44)
         for planet in self.planets.values():
@@ -183,9 +360,9 @@ class GameEngine:
     def _phase_banner(number: int, name: str) -> None:
         print(f"\n  ┌── 第 {number} 階段：{name} " + "─" * 38 + "┐")
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 第 1 階段：商店
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def _phase_shop(self, company: Company) -> None:
         self._phase_banner(1, "商店")
@@ -200,6 +377,7 @@ class GameEngine:
             if not _yes_no("  │  是否進行交易？(y/n)："):
                 break
 
+            # Shop trades use the company's OWN resources only (not shared ledger)
             spendable = [r for r in RESOURCE_KEYS if getattr(company, r) >= 2]
             if not spendable:
                 print("  │  無資源餘額 ≥ 2，無法交易。")
@@ -210,30 +388,37 @@ class GameEngine:
             gain  = _pick_resource("  │  獲得 1 點（選擇資源）：", others)
 
             company.consume_resource(spend, 2)
-            company.add_resource(gain, 1)
+            self._grant_resource(company, gain, 1)   # may trigger Celestial
             print(f"  │  ✓ 交易完成。{self._res_summary(company)}")
             trades_left -= 1
 
         print("  └")
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 第 2 階段：行動
-    # -------------------------------------------------------------------
+    # ===================================================================
 
-    def _effective_seize_req(
-        self, company: Company, planet: Planet
-    ) -> Dict[str, int]:
-        """恆星被動：聯盟中搶佔時，免除最低費用的資源需求。"""
-        req = planet.seize_req
-        if isinstance(company, StellarCompany) and company.in_alliance and req:
-            exempt = min(req, key=lambda k: req[k])
-            return {k: v for k, v in req.items() if k != exempt}
-        return req
+    def _action_requirements(
+        self, company: Company, planet: Planet, action: str
+    ) -> Optional[Dict[str, int]]:
+        """
+        Return the effective requirement dict for an action on a planet,
+        with all applicable passives (Titan, Stellar) factored in.
+        Returns None for free actions (Earth land).
+        """
+        if action == "land":
+            if planet.land_req is None:
+                return None  # free (Earth)
+            return self._effective_requirements(company, planet.land_req)
+        elif action == "occupy":
+            return self._effective_requirements(company, planet.occupy_req)
+        else:  # seize
+            return self._seize_requirements(company, planet)
 
     def _affordable_planets(
         self, company: Company, action: str
     ) -> List[Tuple[str, Planet]]:
-        """回傳目前可執行指定行動且資源足夠的星球列表。"""
+        """回傳目前可執行指定行動且合計資源（含盟友）足夠的星球列表。"""
         results: List[Tuple[str, Planet]] = []
         for name, planet in self.planets.items():
 
@@ -242,13 +427,9 @@ class GameEngine:
                     continue
                 if company.name in planet.landers:
                     continue
-                # 地球 land_req=None，免費；其他星球需確認資源
-                if planet.land_req is not None:
-                    if any(
-                        getattr(company, r) < amt
-                        for r, amt in planet.land_req.items()
-                    ):
-                        continue
+                req = self._action_requirements(company, planet, "land")
+                if req is not None and not self._combined_can_afford(company, req):
+                    continue
                 results.append((name, planet))
 
             elif action == "occupy":
@@ -256,10 +437,8 @@ class GameEngine:
                     continue
                 if company.name not in planet.landers:
                     continue
-                if any(
-                    getattr(company, r) < amt
-                    for r, amt in planet.occupy_req.items()
-                ):
+                req = self._action_requirements(company, planet, "occupy")
+                if req is not None and not self._combined_can_afford(company, req):
                     continue
                 results.append((name, planet))
 
@@ -268,11 +447,8 @@ class GameEngine:
                     continue
                 if planet.occupant == company.name:
                     continue
-                effective = self._effective_seize_req(company, planet)
-                if any(
-                    getattr(company, r) < amt
-                    for r, amt in effective.items()
-                ):
+                req = self._action_requirements(company, planet, "seize")
+                if req is not None and not self._combined_can_afford(company, req):
                     continue
                 results.append((name, planet))
 
@@ -297,28 +473,26 @@ class GameEngine:
 
         print(f"\n  │  選擇要【{action_label}】的星球：")
         for i, (name, planet) in enumerate(options, 1):
-            if action_key == "land":
-                cost = _req_display(planet.land_req, "免費（地球）")
-            elif action_key == "occupy":
-                cost = _req_display(planet.occupy_req)
-            else:
-                cost = _req_display(self._effective_seize_req(company, planet))
+            req = self._action_requirements(company, planet, action_key)
+            cost = _req_display(req, "免費（地球）")
             print(f"  │    [{i}] {_pn(name):<24}  費用：{cost}")
 
         idx = _pick_int("  │  > ", 1, len(options)) - 1
         chosen_name, chosen_planet = options[idx]
 
-        # 先扣除資源，再更新星球狀態
+        # 先扣除資源（聯盟共用帳本），再更新星球狀態
+        req = self._action_requirements(company, chosen_planet, action_key)
+
         if action_key == "land":
-            if chosen_planet.land_req:
-                if not company.consume_resources(chosen_planet.land_req):
+            if req is not None:
+                if not self._consume_shared(company, req):
                     print("  │  資源不足，行動取消。\n  └")
                     return
             chosen_planet.land(company.name)
             print(f"  │  ✓ {_cn(company.name)} 已落地於 {_pn(chosen_name)}。")
 
         elif action_key == "occupy":
-            if not company.consume_resources(chosen_planet.occupy_req):
+            if not self._consume_shared(company, req):  # type: ignore[arg-type]
                 print("  │  資源不足，行動取消。\n  └")
                 return
             chosen_planet.occupy(company.name)
@@ -326,8 +500,7 @@ class GameEngine:
 
         elif action_key == "seize":
             prev = chosen_planet.occupant
-            effective_req = self._effective_seize_req(company, chosen_planet)
-            if not company.consume_resources(effective_req):
+            if not self._consume_shared(company, req):  # type: ignore[arg-type]
                 print("  │  資源不足，行動取消。\n  └")
                 return
             chosen_planet.seize(company.name)
@@ -338,9 +511,9 @@ class GameEngine:
 
         print("  └")
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 第 3 階段：聯盟
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def _phase_alliance(self, company: Company) -> None:
         self._phase_banner(3, "聯盟")
@@ -399,25 +572,30 @@ class GameEngine:
             print(
                 f"  │  ✓ 聯盟成立：{_cn(company.name)} ↔ {_cn(partner.name)}"
             )
+            # Notify applicable passives
+            if isinstance(company, TitanCompany) or isinstance(partner, TitanCompany):
+                print("  │    （泰坦被動：搶佔使用佔領費用，現已生效）")
             if isinstance(company, StellarCompany) or isinstance(partner, StellarCompany):
-                print("  │    （恆星被動：搶佔時最低費用資源免除，現已生效）")
+                print("  │    （恆星被動：最低費用資源需求免除，現已生效）")
+            if isinstance(company, CelestialCompany) or isinstance(partner, CelestialCompany):
+                print("  │    （天穹被動：獲得技術時可轉換人才，現已生效）")
             if isinstance(company, GalaxyCompany) or isinstance(partner, GalaxyCompany):
                 print("  │    （銀河限制：聯盟中商店封鎖，現已生效）")
 
         print("  └")
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 第 4 階段：事件
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def _phase_event(self, company: Company) -> None:
         self._phase_banner(4, "事件")
         print("  │  抽取事件卡…（尚未實裝）")
         print("  └")
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 第 5 階段：結算
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def _prompt_any_resource(
         self, company: Company, amount: int, source: str
@@ -426,7 +604,7 @@ class GameEngine:
         for i in range(amount):
             label = f"（第 {i + 1}/{amount} 點）" if amount > 1 else ""
             chosen = _pick_resource(f"  │  {label}選擇資源：", list(RESOURCE_KEYS))
-            company.add_resource(chosen, 1)
+            self._grant_resource(company, chosen, 1)   # may trigger Celestial
             print(f"  │    +1 {_rn(chosen)}  →  目前 {getattr(company, chosen)}")
 
     def _apply_reward(
@@ -445,7 +623,7 @@ class GameEngine:
                 )
             else:
                 amount = int(value)  # type: ignore[arg-type]
-                company.add_resource(key, amount)
+                self._grant_resource(company, key, amount)   # may trigger Celestial
                 sign = "+" if amount >= 0 else ""
                 print(
                     f"  │  【{_cn(company.name)}】{source}：{sign}{amount} {_rn(key)}"
@@ -466,11 +644,16 @@ class GameEngine:
             print("  │  本回合無收益。")
         print("  └")
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 完整回合
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def play_turn(self, company: Company) -> None:
+        # 重置天穹被動（每回合每公司可觸發一次）
+        for c in self.companies:
+            if isinstance(c, CelestialCompany):
+                c.reset_conversion_flag()
+
         self._print_header(company)
         input(f"  【按 Enter 開始 {_cn(company.name)} 的回合…】")
 
@@ -488,9 +671,9 @@ class GameEngine:
         )
         print(self._line())
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 勝利判定
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def check_monopoly_victory(self) -> Optional[Company]:
         """若有公司同時佔領全部 9 個天體，回傳該公司；否則回傳 None。"""
@@ -502,9 +685,9 @@ class GameEngine:
                 return company
         return None
 
-    # -------------------------------------------------------------------
+    # ===================================================================
     # 主遊戲循環
-    # -------------------------------------------------------------------
+    # ===================================================================
 
     def run(self) -> None:
         print("\n" + "★" * 62)
