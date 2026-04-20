@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import random
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -83,6 +84,57 @@ def _req_display(req: Optional[Dict[str, int]], free_label: str = "免費") -> s
 
 
 # -----------------------------------------------------------------------
+# Event Card definitions
+# -----------------------------------------------------------------------
+
+CARD_TYPE_DISPLAY: Dict[str, str] = {
+    "positive": "正面",
+    "negative": "負面",
+    "special":  "特殊",
+}
+
+# (card_name, card_type, effect_id, quantity)
+CARD_TEMPLATES: List[Tuple[str, str, str, int]] = [
+    # ── 正面 (22 cards) ──
+    ("星際交易成功", "positive", "funds_plus_2",    6),
+    ("媒體大力宣傳", "positive", "support_plus_2",  6),
+    ("量子技術突破", "positive", "tech_plus_1",     6),
+    ("菁英團隊加入", "positive", "talent_plus_2",   4),
+    # ── 負面 (20 cards) ──
+    ("太陽風暴",     "negative", "solar_storm",     4),
+    ("技術投資虧損", "negative", "funds_minus_1",   6),
+    ("人才流失",     "negative", "talent_minus_2",  4),
+    ("支持度下降",   "negative", "support_minus_1", 6),
+    # ── 特殊 (22 cards) ──
+    ("政治抹黑",     "special",  "smear",            6),
+    ("技術轉移",     "special",  "tech_transfer",    4),
+    ("極限募資",     "special",  "extreme_funding",  2),
+    ("商業間諜",     "special",  "spy",              2),
+    ("公關操作",     "special",  "pr_campaign",      2),
+    ("重金挖角",     "special",  "recruit",          2),
+    ("人才掠奪",     "special",  "steal_talent",     4),
+]
+
+CARD_EFFECT_DESC: Dict[str, str] = {
+    "funds_plus_2":    "+2 資金",
+    "support_plus_2":  "+2 支持",
+    "tech_plus_1":     "+1 技術",
+    "talent_plus_2":   "+2 人才",
+    "solar_storm":     "所有公司 -1 技術，自身 -1 資金",
+    "funds_minus_1":   "-1 資金",
+    "talent_minus_2":  "-2 人才",
+    "support_minus_1": "-1 支持",
+    "smear":           "選擇一家公司，雙方 -1 支持",
+    "tech_transfer":   "+1 技術，-1 人才",
+    "extreme_funding": "+3 資金，-2 支持",
+    "spy":             "選擇一家公司，該公司 -2 技術",
+    "pr_campaign":     "+3 支持，-1 資金",
+    "recruit":         "將最多 3 資金轉換為人才（1:1）",
+    "steal_talent":    "選擇一家公司，偷取 2 人才",
+}
+
+
+# -----------------------------------------------------------------------
 # Input helpers
 # -----------------------------------------------------------------------
 
@@ -148,6 +200,9 @@ class GameEngine:
         self.current_turn: int = 1
         # 雙邊聯盟表：公司名 → 盟友名
         self._alliances: Dict[str, str] = {}
+        # 事件卡牌組
+        self._deck: List[Dict[str, str]] = []
+        self._build_deck()
 
     # ===================================================================
     # Alliance / Shared Ledger core
@@ -585,12 +640,237 @@ class GameEngine:
         print("  └")
 
     # ===================================================================
-    # 第 4 階段：事件
+    # 第 4 階段：事件 — 牌組管理
+    # ===================================================================
+
+    def _build_deck(self) -> None:
+        """建立並洗牌一副完整的事件牌組。"""
+        self._deck = []
+        for name, card_type, effect_id, qty in CARD_TEMPLATES:
+            for _ in range(qty):
+                self._deck.append({
+                    "name": name,
+                    "type": card_type,
+                    "effect_id": effect_id,
+                })
+        random.shuffle(self._deck)
+
+    def _draw_card(self) -> Dict[str, str]:
+        """抽一張卡。牌組用盡時自動重建並洗牌。"""
+        if not self._deck:
+            print("  │  （牌組已用盡，重新洗牌…）")
+            self._build_deck()
+        return self._deck.pop()
+
+    # ===================================================================
+    # 第 4 階段：事件 — 安全扣除（地板為 0）
+    # ===================================================================
+
+    def _safe_deduct_shared(
+        self, company: Company, resource: str, amount: int
+    ) -> int:
+        """
+        扣除至多 amount，使用聯盟共用帳本（先從本方扣，不足由盟友承擔），
+        資源不低於 0。回傳實際扣除量。
+        """
+        ally = self._get_ally(company)
+        total = getattr(company, resource)
+        if ally:
+            total += getattr(ally, resource)
+
+        actual = min(total, amount)
+        if actual == 0:
+            return 0
+
+        active_has = getattr(company, resource)
+        from_active = min(active_has, actual)
+        setattr(company, resource, active_has - from_active)
+
+        from_ally = actual - from_active
+        if from_ally > 0 and ally:
+            ally_has = getattr(ally, resource)
+            setattr(ally, resource, ally_has - from_ally)
+            print(
+                f"  │    ⤷ 聯盟共用帳本："
+                f"{_cn(ally.name)} 損失 {from_ally} {_rn(resource)}"
+            )
+        return actual
+
+    # ===================================================================
+    # 第 4 階段：事件 — 目標選擇
+    # ===================================================================
+
+    def _pick_target(self, company: Company) -> Company:
+        """提示玩家選擇目標公司（排除自身）。"""
+        others = [c for c in self.companies if c.name != company.name]
+        print("  │  選擇目標公司：")
+        for i, c in enumerate(others, 1):
+            r = c.get_resources()
+            print(
+                f"  │    [{i}] {_cn(c.name):<22}  "
+                f"技術={r['tech']}  人才={r['talent']}  "
+                f"支持={r['support']}  資金={r['funds']}"
+            )
+        idx = _pick_int("  │  > ", 1, len(others)) - 1
+        return others[idx]
+
+    # ===================================================================
+    # 第 4 階段：事件 — 卡牌效果解析
+    # ===================================================================
+
+    def _resolve_card(self, company: Company, card: Dict[str, str]) -> None:
+        """依據 effect_id 執行卡牌效果。"""
+        eid = card["effect_id"]
+
+        # ── 正面 ──────────────────────────────────────────────
+        if eid == "funds_plus_2":
+            self._grant_resource(company, "funds", 2)
+            print(f"  │  效果：+2 資金")
+
+        elif eid == "support_plus_2":
+            self._grant_resource(company, "support", 2)
+            print(f"  │  效果：+2 支持")
+
+        elif eid == "tech_plus_1":
+            self._grant_resource(company, "tech", 1)
+            print(f"  │  效果：+1 技術")
+
+        elif eid == "talent_plus_2":
+            self._grant_resource(company, "talent", 2)
+            print(f"  │  效果：+2 人才")
+
+        # ── 負面 ──────────────────────────────────────────────
+        elif eid == "solar_storm":
+            print(f"  │  效果：所有公司 -1 技術，自身 -1 資金")
+            for c in self.companies:
+                taken = self._safe_deduct_shared(c, "tech", 1)
+                label = f"-{taken} 技術" if taken > 0 else "技術為 0，無影響"
+                print(f"  │    {_cn(c.name)}：{label}")
+            funds_taken = self._safe_deduct_shared(company, "funds", 1)
+            if funds_taken > 0:
+                print(f"  │    {_cn(company.name)}：額外 -{funds_taken} 資金")
+
+        elif eid == "funds_minus_1":
+            taken = self._safe_deduct_shared(company, "funds", 1)
+            print(f"  │  效果：-{taken} 資金")
+
+        elif eid == "talent_minus_2":
+            taken = self._safe_deduct_shared(company, "talent", 2)
+            print(f"  │  效果：-{taken} 人才")
+
+        elif eid == "support_minus_1":
+            taken = self._safe_deduct_shared(company, "support", 1)
+            print(f"  │  效果：-{taken} 支持")
+
+        # ── 特殊 ──────────────────────────────────────────────
+        elif eid == "smear":
+            target = self._pick_target(company)
+            t_self = self._safe_deduct_shared(company, "support", 1)
+            t_tgt  = self._safe_deduct_shared(target,  "support", 1)
+            print(
+                f"  │  效果：{_cn(company.name)} -{t_self} 支持，"
+                f"{_cn(target.name)} -{t_tgt} 支持"
+            )
+
+        elif eid == "tech_transfer":
+            taken = self._safe_deduct_shared(company, "talent", 1)
+            self._grant_resource(company, "tech", 1)
+            print(f"  │  效果：+1 技術，-{taken} 人才")
+
+        elif eid == "extreme_funding":
+            self._grant_resource(company, "funds", 3)
+            taken = self._safe_deduct_shared(company, "support", 2)
+            print(f"  │  效果：+3 資金，-{taken} 支持")
+
+        elif eid == "spy":
+            target = self._pick_target(company)
+            taken = self._safe_deduct_shared(target, "tech", 2)
+            print(f"  │  效果：{_cn(target.name)} -{taken} 技術")
+
+        elif eid == "pr_campaign":
+            self._grant_resource(company, "support", 3)
+            taken = self._safe_deduct_shared(company, "funds", 1)
+            print(f"  │  效果：+3 支持，-{taken} 資金")
+
+        elif eid == "recruit":
+            max_n = min(3, company.funds)
+            if max_n == 0:
+                print(f"  │  資金為 0，無法轉換。")
+            else:
+                n = _pick_int(
+                    f"  │  請選擇要轉換的資金數量 (0-{max_n})：", 0, max_n
+                )
+                if n > 0:
+                    company.consume_resource("funds", n)
+                    self._grant_resource(company, "talent", n)
+                    print(f"  │  效果：-{n} 資金，+{n} 人才")
+                else:
+                    print(f"  │  放棄轉換。")
+
+        elif eid == "steal_talent":
+            target = self._pick_target(company)
+            taken = self._safe_deduct_shared(target, "talent", 2)
+            if taken > 0:
+                self._grant_resource(company, "talent", taken)
+            print(f"  │  效果：從 {_cn(target.name)} 偷取 {taken} 人才")
+
+    # ===================================================================
+    # 第 4 階段：事件 — 主流程
     # ===================================================================
 
     def _phase_event(self, company: Company) -> None:
         self._phase_banner(4, "事件")
-        print("  │  抽取事件卡…（尚未實裝）")
+
+        # ── 銀河宣言（抽卡前宣告） ──
+        ally = self._get_ally(company)
+        is_galaxy = (
+            isinstance(company, GalaxyCompany)
+            or (ally is not None and isinstance(ally, GalaxyCompany))
+        )
+        wager = 0
+        if is_galaxy:
+            galaxy_co = company if isinstance(company, GalaxyCompany) else ally
+            print(f"  │  ✦ 銀河宣言（{_cn(galaxy_co.name)} 被動）")  # type: ignore[union-attr]
+            print(f"  │    正面/特殊卡 → +N 支持；負面卡 → -2N 支持")
+            wager = _pick_int("  │    請宣告數字 (0-5)：", 0, 5)
+            if wager == 0:
+                print("  │    宣告 0，不下注。")
+            else:
+                print(f"  │    已宣告：{wager}")
+
+        # ── 抽卡 ──
+        card = self._draw_card()
+        type_label = CARD_TYPE_DISPLAY.get(card["type"], card["type"])
+        desc = CARD_EFFECT_DESC.get(card["effect_id"], "")
+        print(f"  │")
+        print(f"  │  ▶ 抽取事件卡：【{card['name']}】（{type_label}）")
+        print(f"  │    {desc}")
+        print(f"  │")
+
+        # ── 解析卡牌效果 ──
+        self._resolve_card(company, card)
+
+        # ── 銀河宣言結算 ──
+        if wager > 0:
+            print(f"  │")
+            if card["type"] in ("positive", "special"):
+                company.add_resource("support", wager)
+                print(
+                    f"  │  ✦ 銀河宣言成功！"
+                    f"{_cn(company.name)} +{wager} 支持"
+                )
+            else:  # negative
+                penalty = wager * 2
+                taken = self._safe_deduct_shared(company, "support", penalty)
+                print(
+                    f"  │  ✦ 銀河宣言失敗！"
+                    f"{_cn(company.name)} -{taken} 支持"
+                    f"（宣告 {wager} × 2 = {penalty}，實際 -{taken}）"
+                )
+
+        # ── 顯示最終資源 ──
+        print(f"  │")
+        print(f"  │  目前資源：{self._res_summary(company)}")
         print("  └")
 
     # ===================================================================
