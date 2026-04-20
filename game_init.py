@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Dict, List, Tuple
+
 from data_loader import DataLoader
 from planet import Planet
 from company import Company
@@ -7,7 +9,7 @@ from company import Company
 
 def initialize_game(
     config_path: str = "game_config.json",
-) -> tuple[list[Company], dict[str, Planet]]:
+) -> Tuple[List[Company], Dict[str, Planet]]:
     """
     Load config, instantiate all companies and planets, then apply the
     starting rule: every company begins with Landed status on Earth.
@@ -18,8 +20,8 @@ def initialize_game(
     """
     loader = DataLoader(config_path)
 
-    companies: list[Company] = loader.load_companies()
-    planets: dict[str, Planet] = {p.name: p for p in loader.load_planets()}
+    companies: List[Company] = loader.load_companies()
+    planets: Dict[str, Planet] = {p.name: p for p in loader.load_planets()}
 
     # Rule: all companies start Landed on Earth (no cost required)
     earth = planets["Earth"]
@@ -30,20 +32,12 @@ def initialize_game(
 
 
 # ----------------------------------------------------------------------
-# Entry point — prints initial game state for manual verification
+# Entry point
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from game_engine import GameEngine
+
     companies, planets = initialize_game()
-
-    print("=" * 50)
-    print("STAR SEA HEGEMONY — Initial Game State")
-    print("=" * 50)
-
-    print("\n--- Companies ---")
-    for c in companies:
-        print(c)
-
-    print("\n--- Planets ---")
-    for p in planets.values():
-        print(p)
+    engine = GameEngine(companies, planets)
+    engine.run()
