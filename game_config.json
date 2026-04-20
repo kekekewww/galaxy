@@ -1,0 +1,98 @@
+{
+  "planets": [
+    {
+      "name": "Mercury",
+      "land_req": { "tech": 4, "funds": 4 },
+      "land_reward": { "funds": 1, "tech": 1 },
+      "occupy_req": { "talent": 5, "support": 3 },
+      "occupy_reward": { "tech": 2 },
+      "seize_req": { "talent": 6, "support": 4 }
+    },
+    {
+      "name": "Venus",
+      "land_req": { "tech": 3, "support": 4 },
+      "land_reward": { "talent": 1 },
+      "occupy_req": { "support": 3, "talent": 4, "funds": 1 },
+      "occupy_reward": { "any": 2 },
+      "seize_req": { "support": 5, "talent": 5 }
+    },
+    {
+      "name": "Earth",
+      "land_req": null,
+      "land_reward": { "any": 1 },
+      "occupy_req": { "support": 12, "funds": 1 },
+      "occupy_reward": { "support": 3 },
+      "seize_req": { "support": 13 }
+    },
+    {
+      "name": "Mars",
+      "land_req": { "support": 4, "tech": 2 },
+      "land_reward": { "talent": 1 },
+      "occupy_req": { "talent": 2, "funds": 1, "support": 2 },
+      "occupy_reward": { "talent": 1, "support": 1 },
+      "seize_req": { "talent": 3, "funds": 2 }
+    },
+    {
+      "name": "Jupiter",
+      "land_req": { "tech": 4, "talent": 3 },
+      "land_reward": { "funds": 1 },
+      "occupy_req": { "tech": 4, "support": 3, "funds": 5 },
+      "occupy_reward": { "funds": -1, "tech": 3 },
+      "seize_req": { "support": 4, "funds": 6 }
+    },
+    {
+      "name": "Saturn",
+      "land_req": { "tech": 5, "support": 3 },
+      "land_reward": { "tech": 1, "funds": 1 },
+      "occupy_req": { "talent": 5, "funds": 4 },
+      "occupy_reward": { "talent": 1, "funds": 2 },
+      "seize_req": { "talent": 6, "funds": 5 }
+    },
+    {
+      "name": "Uranus",
+      "land_req": { "tech": 10, "funds": 5 },
+      "land_reward": { "funds": 2 },
+      "occupy_req": { "tech": 4, "talent": 5, "support": 2, "funds": 4 },
+      "occupy_reward": { "special": "card_effect_placeholder" },
+      "seize_req": { "tech": 5, "talent": 6, "support": 3, "funds": 5 }
+    },
+    {
+      "name": "Neptune",
+      "land_req": { "tech": 7, "funds": 5 },
+      "land_reward": { "talent": 1, "tech": 2 },
+      "occupy_req": { "talent": 6, "support": 2, "funds": 5 },
+      "occupy_reward": { "any": 3 },
+      "seize_req": { "talent": 7, "support": 3, "funds": 6 }
+    },
+    {
+      "name": "Sun",
+      "land_req": null,
+      "land_reward": null,
+      "occupy_req": { "talent": 12, "tech": 15, "funds": 15 },
+      "occupy_reward": { "special": "dyson_sphere_buff" },
+      "seize_req": { "talent": 13, "tech": 16, "funds": 16, "support": 10 }
+    }
+  ],
+  "companies": [
+    {
+      "name": "Titan",
+      "base": 3,
+      "bonus": { "talent": 2 }
+    },
+    {
+      "name": "Celestial",
+      "base": 1,
+      "bonus": { "tech": 3 }
+    },
+    {
+      "name": "Galaxy",
+      "base": 1,
+      "bonus": { "support": 4 }
+    },
+    {
+      "name": "Stellar",
+      "base": 1,
+      "bonus": { "funds": 4 }
+    }
+  ]
+}
